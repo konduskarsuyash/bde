@@ -1,0 +1,60 @@
+services:
+  db:
+    image: postgres:13
+    environment:
+      POSTGRES_DB: premier_league
+      POSTGRES_USER: suyash
+      POSTGRES_PASSWORD: suyash
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  web:
+    build: .
+    environment:
+      - POSTGRES_DB=premier_league
+      - POSTGRES_USER=suyash
+      - POSTGRES_PASSWORD=suyash
+      - POSTGRES_HOST=db
+      - POSTGRES_PORT=5432
+      - JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
+      - PYSPARK_PYTHON=/usr/local/bin/python
+      - PYSPARK_DRIVER_PYTHON=/usr/local/bin/python
+    command: streamlit run app.py --server.port=8501 --server.address=0.0.0.0
+    volumes:
+      - .:/app
+    ports:
+      - "8501:8501"
+    depends_on:
+      - db
+
+  demo:
+    build: .
+    environment:
+      - POSTGRES_DB=premier_league
+      - POSTGRES_USER=suyash
+      - POSTGRES_PASSWORD=suyash
+      - POSTGRES_HOST=db
+      - POSTGRES_PORT=5432
+      - JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
+      - PYSPARK_PYTHON=/usr/local/bin/python
+      - PYSPARK_DRIVER_PYTHON=/usr/local/bin/python
+    command: streamlit run demo.py --server.port=8502 --server.address=0.0.0.0
+    volumes:
+      - .:/app
+    ports:
+      - "8502:8502"
+    depends_on:
+      - db
+
+  adminer:
+    image: adminer
+    restart: always
+    ports:
+      - "8080:8080"
+    depends_on:
+      - db
+
+volumes:
+  postgres_data:

@@ -1,0 +1,10 @@
+__pycache__
+.env
+storage
+users.db
+captured_image.png
+generated_image.png
+image.png
+env
+chat.json
+users.db
