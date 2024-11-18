@@ -19,6 +19,9 @@ services:
       - POSTGRES_HOST=db
       - POSTGRES_PORT=5432
       - JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
+      - SPARK_HOME=/opt/spark
+      - PATH=/opt/spark/bin:/usr/lib/jvm/java-11-openjdk-amd64/bin:$PATH
+      - PYTHONPATH=/opt/spark/python:/opt/spark/python/lib/py4j-0.10.9.7-src.zip:$PYTHONPATH
       - PYSPARK_PYTHON=/usr/local/bin/python
       - PYSPARK_DRIVER_PYTHON=/usr/local/bin/python
     command: streamlit run app.py --server.port=8501 --server.address=0.0.0.0
@@ -38,6 +41,9 @@ services:
       - POSTGRES_HOST=db
       - POSTGRES_PORT=5432
       - JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
+      - SPARK_HOME=/opt/spark
+      - PATH=/opt/spark/bin:/usr/lib/jvm/java-11-openjdk-amd64/bin:$PATH
+      - PYTHONPATH=/opt/spark/python:/opt/spark/python/lib/py4j-0.10.9.7-src.zip:$PYTHONPATH
       - PYSPARK_PYTHON=/usr/local/bin/python
       - PYSPARK_DRIVER_PYTHON=/usr/local/bin/python
     command: streamlit run demo.py --server.port=8502 --server.address=0.0.0.0

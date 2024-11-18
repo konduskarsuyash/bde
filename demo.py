@@ -4,12 +4,12 @@ import plotly.express as px
 from datetime import datetime
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import count, hour, collect_list, countDistinct, size
-import sqlite3
+import psycopg2
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 from pyspark.sql.functions import length, countDistinct, collect_list
 from pyspark import SparkConf
-
+import os
 
 # Set page config
 st.set_page_config(
@@ -24,11 +24,22 @@ spark = SparkSession.builder \
     .config("spark.master", "local[*]") \
     .config("spark.executor.extraJavaOptions", "-Djava.security.manager=allow") \
     .config("spark.driver.extraJavaOptions", "-Djava.security.manager=allow") \
+    .config("spark.driver.memory", "2g") \
+    .config("spark.executor.memory", "2g") \
     .getOrCreate()
 
+def get_db_connection():
+    """Create and return a database connection"""
+    return psycopg2.connect(
+        dbname=os.getenv("POSTGRES_DB"),
+        user=os.getenv("POSTGRES_USER"),
+        password=os.getenv("POSTGRES_PASSWORD"),
+        host=os.getenv("POSTGRES_HOST"),
+        port=os.getenv("POSTGRES_PORT")
+    )
 
 def get_active_interactions_spark():
-    conn = sqlite3.connect("users.db")
+    conn = get_db_connection()
     
     # Use a SQL JOIN to fetch username and timestamp from active_interactions and users tables
     query = """
@@ -57,11 +68,11 @@ def prepare_activity_data_spark(interactions_df):
     return activity_df
 
 def get_chat_history():
-    conn = sqlite3.connect("users.db")
-    query = "SELECT message FROM chat_history WHERE message LIKE ?"
-    c = conn.cursor()
-    c.execute(query, ('%?',))  # Assuming questions end with a question mark
-    rows = c.fetchall()
+    conn = get_db_connection()
+    query = "SELECT message FROM chat_history WHERE message LIKE %s"
+    with conn.cursor() as c:
+        c.execute(query, ('%?%',))  # Assuming questions end with a question mark
+        rows = c.fetchall()
     conn.close()
     return [row[0] for row in rows]
 
@@ -76,8 +87,8 @@ def count_most_asked_questions(questions):
     return question_counts
 
 def get_region_data_spark():
-    # Connect to SQLite and fetch data
-    conn = sqlite3.connect("users.db")
+    # Connect to PostgreSQL and fetch data
+    conn = get_db_connection()
     query = "SELECT region, COUNT(*) as Users FROM users GROUP BY region"
     region_data = pd.read_sql_query(query, conn)
     conn.close()
@@ -86,10 +97,10 @@ def get_region_data_spark():
     return spark.createDataFrame(region_data)
 
 def get_user_region(user_id):
-    conn = sqlite3.connect("users.db")
-    c = conn.cursor()
-    c.execute("SELECT region FROM users WHERE user_id = ?", (user_id,))
-    result = c.fetchone()
+    conn = get_db_connection()
+    with conn.cursor() as c:
+        c.execute("SELECT region FROM users WHERE user_id = %s", (user_id,))
+        result = c.fetchone()
     conn.close()
     if result:
         return result[0]
@@ -103,7 +114,6 @@ def get_country_code(region):
         # Add more mappings as needed
     }
     return region_to_country.get(region.lower(), region)
-
 
 def run_dashboard():
     # Custom CSS for dark theme
@@ -199,7 +209,6 @@ def run_dashboard():
         # Display the figure
         st.plotly_chart(fig, use_container_width=True)
 
-
     with col2:
         st.subheader("Users by Region")
         
@@ -225,7 +234,6 @@ def run_dashboard():
     # Convert Spark DataFrame to Pandas DataFrame for plotting
     activity_df = activity_spark_df.toPandas()
 
-
     # Plotting the activity data by username
     st.subheader("User Activity by Username")
     fig_activity = px.bar(
@@ -248,7 +256,6 @@ def run_dashboard():
 
     # Display the plot
     st.plotly_chart(fig_activity, use_container_width=True)
-
 
     # Create a line graph for user interactions
     st.subheader("User Interactions Over Time")
@@ -287,7 +294,6 @@ def run_dashboard():
         ),
         showlegend=False,
         hovermode='x unified',
-        # plot_bgcolor='rgba(0,0,0,0)',
         margin=dict(t=30, l=10, r=10, b=10)
     )
 
@@ -308,10 +314,7 @@ def run_dashboard():
         file_name=f'user_distribution.csv',
         mime='text/csv'
     )
-    
-    
 
 # Call run_dashboard to display the Streamlit app
 if __name__ == "__main__":
     run_dashboard()
-
