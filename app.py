@@ -12,9 +12,6 @@ from tools.vision import camera_query_tool
 from tools.utube import search_video_tool, get_transcript_tool, get_video_captions_tool, get_video_url_tool
 from tools.check_image import check_image
 from tools.RAG import text_rag_tool
-import psycopg2
-from psycopg2 import sql
-
 
 # firebase_config.py
 import firebase_admin
@@ -32,36 +29,31 @@ load_dotenv()
 os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
 
 # Database setup
-# Database setup with PostgreSQL
+# Database setup with SQLite
 def init_db():
-    # Connect to PostgreSQL using environment variables
-    conn = psycopg2.connect(
-        dbname=os.getenv("POSTGRES_DB"),
-        user=os.getenv("POSTGRES_USER"),
-        password=os.getenv("POSTGRES_PASSWORD"),
-        host=os.getenv("POSTGRES_HOST"),
-        port=os.getenv("POSTGRES_PORT")
-    )
+    conn = sqlite3.connect("users.db", check_same_thread=False)
     c = conn.cursor()
     
     # Create tables if they don't exist
     c.execute('''CREATE TABLE IF NOT EXISTS users (
-                    user_id SERIAL PRIMARY KEY,
+                    user_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     username TEXT UNIQUE,
                     region TEXT,
                     password TEXT)''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS chat_history (
-                    message_id SERIAL PRIMARY KEY,
-                    user_id INTEGER REFERENCES users(user_id),
-                    timestamp TIMESTAMP,
+                    message_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    timestamp TEXT,
                     role TEXT,
-                    message TEXT)''')
+                    message TEXT,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id))''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS active_interactions (
-                    interaction_id SERIAL PRIMARY KEY,
-                    user_id INTEGER REFERENCES users(user_id),
-                    timestamp TIMESTAMP)''')
+                    interaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    timestamp TEXT,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id))''')
     
     conn.commit()
     return conn, c
@@ -71,39 +63,33 @@ conn, c = init_db()
 
 # Function to log active timestamp
 def log_active_timestamp(user_id):
-    timestamp = datetime.now()
-    c.execute("INSERT INTO active_interactions (user_id, timestamp) VALUES (%s, %s)", (user_id, timestamp))
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    c.execute("INSERT INTO active_interactions (user_id, timestamp) VALUES (?, ?)", (user_id, timestamp))
     conn.commit()
-
 
 # Authentication functions
 def hash_password(password):
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
 
 def check_password(password, hashed):
-    # Ensure the hashed password is in bytes
     if isinstance(hashed, str):
         hashed = hashed.encode('utf-8')
     return bcrypt.checkpw(password.encode('utf-8'), hashed)
 
-
 def signup_user(username, password, region):
     try:
-        # Hash the password and store it as a string
         hashed_password = hash_password(password).decode('utf-8')
         c.execute(
-            "INSERT INTO users (username, password, region) VALUES (%s, %s, %s)", 
+            "INSERT INTO users (username, password, region) VALUES (?, ?, ?)", 
             (username, hashed_password, region)
         )
         conn.commit()
         return True
-    except psycopg2.IntegrityError:
-        conn.rollback()
+    except sqlite3.IntegrityError:
         return False
 
-
 def login_user(username, password):
-    c.execute("SELECT user_id, password FROM users WHERE username = %s", (username,))
+    c.execute("SELECT user_id, password FROM users WHERE username = ?", (username,))
     user = c.fetchone()
     if user and check_password(password, user[1]):
         return user[0]  # Return user_id
@@ -111,22 +97,20 @@ def login_user(username, password):
 
 # Chat history functions
 def save_message(user_id, role, message):
-    timestamp = datetime.now()
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     c.execute("""INSERT INTO chat_history (user_id, timestamp, role, message)
-                 VALUES (%s, %s, %s, %s)""", 
+                 VALUES (?, ?, ?, ?)""", 
               (user_id, timestamp, role, message))
     conn.commit()
-
 
 def get_user_chat_history(user_id, limit=50):
     c.execute("""SELECT role, message, timestamp 
                  FROM chat_history 
-                 WHERE user_id = %s 
+                 WHERE user_id = ? 
                  ORDER BY timestamp DESC 
-                 LIMIT %s""", 
+                 LIMIT ?""", 
               (user_id, limit))
     return c.fetchall()
-
 
 # Initialize the agent
 system_prompt = """

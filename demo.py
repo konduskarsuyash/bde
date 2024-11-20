@@ -1,15 +1,15 @@
+import sqlite3
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 from datetime import datetime
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import count, hour, collect_list, countDistinct, size
-import psycopg2
-from plotly.subplots import make_subplots
-import plotly.graph_objects as go
 from pyspark.sql.functions import length, countDistinct, collect_list
 from pyspark import SparkConf
 import os
+import plotly.graph_objects as go
+
 
 # Set page config
 st.set_page_config(
@@ -30,13 +30,7 @@ spark = SparkSession.builder \
 
 def get_db_connection():
     """Create and return a database connection"""
-    return psycopg2.connect(
-        dbname=os.getenv("POSTGRES_DB"),
-        user=os.getenv("POSTGRES_USER"),
-        password=os.getenv("POSTGRES_PASSWORD"),
-        host=os.getenv("POSTGRES_HOST"),
-        port=os.getenv("POSTGRES_PORT")
-    )
+    return sqlite3.connect("users.db")
 
 def get_active_interactions_spark():
     conn = get_db_connection()
@@ -59,6 +53,29 @@ def get_active_interactions_spark():
     
     return spark.createDataFrame(active_interactions_df)
 
+def get_active_interactions():
+    conn = get_db_connection()
+    query = """
+    SELECT timestamp 
+    FROM active_interactions 
+    ORDER BY timestamp
+    """
+    active_interactions_df = pd.read_sql_query(query, conn)
+    conn.close()
+    
+    if active_interactions_df.empty:
+        st.warning("No interaction data available.")
+        return pd.DataFrame(columns=['timestamp'])
+    
+    # Convert timestamp strings to datetime objects with a more flexible approach
+    active_interactions_df['timestamp'] = pd.to_datetime(
+        active_interactions_df['timestamp'],
+        format='mixed',
+        dayfirst=False,
+        yearfirst=True
+    )
+    return active_interactions_df
+
 def prepare_activity_data_spark(interactions_df):
     # Group interactions by username and count the occurrences
     activity_df = interactions_df \
@@ -69,7 +86,7 @@ def prepare_activity_data_spark(interactions_df):
 
 def get_chat_history():
     conn = get_db_connection()
-    query = "SELECT message FROM chat_history WHERE message LIKE %s"
+    query = "SELECT message FROM chat_history WHERE message LIKE ?"
     with conn.cursor() as c:
         c.execute(query, ('%?%',))  # Assuming questions end with a question mark
         rows = c.fetchall()
@@ -87,7 +104,7 @@ def count_most_asked_questions(questions):
     return question_counts
 
 def get_region_data_spark():
-    # Connect to PostgreSQL and fetch data
+    # Connect to SQLite and fetch data
     conn = get_db_connection()
     query = "SELECT region, COUNT(*) as Users FROM users GROUP BY region"
     region_data = pd.read_sql_query(query, conn)
@@ -98,10 +115,10 @@ def get_region_data_spark():
 
 def get_user_region(user_id):
     conn = get_db_connection()
-    with conn.cursor() as c:
-        c.execute("SELECT region FROM users WHERE user_id = %s", (user_id,))
-        result = c.fetchone()
-    conn.close()
+    with conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT region FROM users WHERE user_id = ?", (user_id,))
+        result = cursor.fetchone()
     if result:
         return result[0]
     return "Unknown"
@@ -260,42 +277,55 @@ def run_dashboard():
     # Create a line graph for user interactions
     st.subheader("User Interactions Over Time")
 
-    # Get the interaction data
-    active_interactions_df = active_interactions_spark_df.toPandas()
-    active_interactions_df['timestamp'] = pd.to_datetime(active_interactions_df['timestamp'])
-    active_interactions_df = active_interactions_df.set_index('timestamp')
-
-    # Resample the data to get hourly counts
-    hourly_interactions = active_interactions_df.resample('H').size().reset_index(name='count')
-
-    # Create the line graph with enhanced styling
-    fig_line = px.line(
-        hourly_interactions,
-        x='timestamp',
-        y='count',
-        title='User Interactions Over Time',
-        labels={'timestamp': 'Time', 'count': 'Number of Interactions'}
-    )
-
-    # Update layout for dark theme with better styling
-    fig_line.update_layout(
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
-        xaxis_title="Time",
-        yaxis_title="Number of Interactions",
-        xaxis=dict(
-            showgrid=True,
-            gridcolor='rgba(255, 255, 255, 0.1)',
-            tickformat='%H:%M\n%Y-%m-%d'
-        ),
-        yaxis=dict(
-            showgrid=True,
-            gridcolor='rgba(255, 255, 255, 0.1)'
-        ),
-        showlegend=False,
-        hovermode='x unified',
-        margin=dict(t=30, l=10, r=10, b=10)
-    )
+    active_interactions_df = get_active_interactions()
+    
+    if not active_interactions_df.empty:
+        # Group by hour and count interactions
+        hourly_interactions = active_interactions_df.groupby(
+            pd.Grouper(key='timestamp', freq='H')
+        ).size().reset_index(name='count')
+        
+        # Create the line graph
+        fig_line = go.Figure()
+        
+        # Add the line trace
+        fig_line.add_trace(
+            go.Scatter(
+                x=hourly_interactions['timestamp'],
+                y=hourly_interactions['count'],
+                mode='lines+markers',
+                name='Interactions',
+                line=dict(color='#00ff00', width=2),
+                marker=dict(size=8, color='#00ff00')
+            )
+        )
+        
+        # Update layout
+        fig_line.update_layout(
+            title='User Interactions Over Time',
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            xaxis=dict(
+                title='Time',
+                showgrid=True,
+                gridcolor='rgba(255, 255, 255, 0.1)',
+                tickformat='%H:%M\n%Y-%m-%d',
+                range=[hourly_interactions['timestamp'].min(), hourly_interactions['timestamp'].max()]
+            ),
+            yaxis=dict(
+                title='Number of Interactions',
+                showgrid=True,
+                gridcolor='rgba(255, 255, 255, 0.1)'
+            ),
+            hovermode='x unified',
+            showlegend=False,
+            margin=dict(t=30, l=10, r=10, b=10)
+        )
+        
+        # Display the plot
+        st.plotly_chart(fig_line, use_container_width=True)
+    else:
+        st.warning("No interaction data available for visualization.")
 
     # Update line styling
     fig_line.update_traces(
@@ -304,16 +334,13 @@ def run_dashboard():
         hovertemplate='Time: %{x}<br>Interactions: %{y}<extra></extra>'
     )
 
-    # Display the line graph
-    st.plotly_chart(fig_line, use_container_width=True)
-
-    # Add download button for data
+        # Add download button for data
     st.download_button(
-        label="Download Data",
-        data=df.to_csv(index=False).encode('utf-8'),
-        file_name=f'user_distribution.csv',
-        mime='text/csv'
-    )
+            label="Download Data",
+            data=df.to_csv(index=False).encode('utf-8'),
+            file_name=f'user_distribution.csv',
+            mime='text/csv'
+        )
 
 # Call run_dashboard to display the Streamlit app
 if __name__ == "__main__":
