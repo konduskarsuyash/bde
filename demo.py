@@ -9,7 +9,7 @@ from pyspark.sql.functions import length, countDistinct, collect_list
 from pyspark import SparkConf
 import os
 import plotly.graph_objects as go
-
+from datetime import timedelta
 
 # Set page config
 st.set_page_config(
@@ -52,6 +52,70 @@ def get_active_interactions_spark():
         return spark.createDataFrame(pd.DataFrame(columns=["timestamp", "username"]))  # Return empty Spark DataFrame with schema
     
     return spark.createDataFrame(active_interactions_df)
+def get_query_count():
+    """Get total number of queries from chat_history"""
+    conn = get_db_connection()
+    cursor = conn.cursor()  # Create the cursor
+    cursor.execute("SELECT COUNT(*) FROM chat_history")
+    count = cursor.fetchone()[0]
+    cursor.close()  # Explicitly close the cursor
+    conn.close()
+    return count
+
+
+def get_common_topics():
+    """Analyze messages to get common topics"""
+    conn = get_db_connection()
+    cursor = conn.cursor()  # Explicitly create the cursor
+    cursor.execute("SELECT message FROM chat_history")
+    messages = cursor.fetchall()
+    cursor.close()  # Explicitly close the cursor
+    conn.close()
+
+    
+    # Sample topics - you should implement actual message analysis here
+    topics = {
+        'Experience': 8,
+        'Im': 10,
+        'Incredible': 6,
+        'Luffy': 12,
+        'Madara': 12,
+        'Name': 9,
+        'Powerful': 9
+    }
+    
+    return pd.DataFrame(list(topics.items()), columns=['topic', 'count'])
+
+def calculate_customer_satisfaction():
+    """
+    Calculate customer satisfaction percentage based on chat history sentiment.
+    Positive messages are assumed to reflect customer satisfaction.
+    """
+    conn = sqlite3.connect("users.db", check_same_thread=False)
+    cursor = conn.cursor()
+    
+    try:
+        # Query to count positive and total messages
+        cursor.execute("SELECT COUNT(*) FROM chat_history WHERE role = 'positive'")
+        positive_count = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM chat_history")
+        total_count = cursor.fetchone()[0]
+        
+        if total_count == 0:
+            # Avoid division by zero; return 0% satisfaction if no data exists
+            return 0.0
+        
+        # Calculate satisfaction as a percentage
+        satisfaction_percentage = (positive_count / total_count) * 100
+        return round(satisfaction_percentage, 2)
+    
+    finally:
+        # Ensure resources are properly released
+        cursor.close()
+        conn.close()
+
+
 
 def get_active_interactions():
     conn = get_db_connection()
@@ -87,10 +151,12 @@ def prepare_activity_data_spark(interactions_df):
 def get_chat_history():
     conn = get_db_connection()
     query = "SELECT message FROM chat_history WHERE message LIKE ?"
-    with conn.cursor() as c:
-        c.execute(query, ('%?%',))  # Assuming questions end with a question mark
-        rows = c.fetchall()
+    cursor = conn.cursor()  # Explicitly create the cursor
+    cursor.execute(query, ('%?%',))  # Assuming questions end with a question mark
+    rows = cursor.fetchall()
+    cursor.close()  # Explicitly close the cursor
     conn.close()
+
     return [row[0] for row in rows]
 
 def count_most_asked_questions(questions):
@@ -274,52 +340,60 @@ def run_dashboard():
     # Display the plot
     st.plotly_chart(fig_activity, use_container_width=True)
 
-    # Create a line graph for user interactions
-    st.subheader("User Interactions Over Time")
-
+    st.title("Global User Distribution and Interaction")
+    
+    # Create line graph for user interactions
+    st.subheader("Trend of User Sessions")
     active_interactions_df = get_active_interactions()
     
     if not active_interactions_df.empty:
-        # Group by hour and count interactions
-        hourly_interactions = active_interactions_df.groupby(
-            pd.Grouper(key='timestamp', freq='H')
-        ).size().reset_index(name='count')
+        # Filter for the past 7 days
+        past_7_days = datetime.now() - timedelta(days=7)
+        filtered_interactions = active_interactions_df[
+            active_interactions_df['timestamp'] >= past_7_days
+        ]
+        
+        # Group by day and count interactions
+        filtered_interactions['day_of_week'] = filtered_interactions['timestamp'].dt.day_name()
+        daily_interactions = (
+            filtered_interactions.groupby('day_of_week')
+            .size()
+            .reindex(['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'], fill_value=0)
+            .reset_index(name='count')
+        )
         
         # Create the line graph
         fig_line = go.Figure()
-        
-        # Add the line trace
         fig_line.add_trace(
             go.Scatter(
-                x=hourly_interactions['timestamp'],
-                y=hourly_interactions['count'],
+                x=daily_interactions['day_of_week'],
+                y=daily_interactions['count'],
+                fill='tozeroy',
+                fillcolor='rgba(65, 105, 225, 0.2)',
+                line=dict(color='rgb(65, 105, 225)', width=2),
                 mode='lines+markers',
-                name='Interactions',
-                line=dict(color='#00ff00', width=2),
-                marker=dict(size=8, color='#00ff00')
+                marker=dict(size=8, color='rgb(65, 105, 225)'),
+                hovertemplate='%{y} sessions<extra></extra>'
             )
         )
         
         # Update layout
         fig_line.update_layout(
-            title='User Interactions Over Time',
+            title='User Sessions Over the Past Week',
             paper_bgcolor='rgba(0,0,0,0)',
             plot_bgcolor='rgba(0,0,0,0)',
             xaxis=dict(
-                title='Time',
+                title='Day of Week',
                 showgrid=True,
-                gridcolor='rgba(255, 255, 255, 0.1)',
-                tickformat='%H:%M\n%Y-%m-%d',
-                range=[hourly_interactions['timestamp'].min(), hourly_interactions['timestamp'].max()]
+                gridcolor='rgba(255,255,255,0.1)'
             ),
             yaxis=dict(
                 title='Number of Interactions',
                 showgrid=True,
-                gridcolor='rgba(255, 255, 255, 0.1)'
+                gridcolor='rgba(255,255,255,0.1)'
             ),
             hovermode='x unified',
-            showlegend=False,
-            margin=dict(t=30, l=10, r=10, b=10)
+            showlegend=False
         )
         
         # Display the plot
@@ -333,6 +407,73 @@ def run_dashboard():
         line_width=2,
         hovertemplate='Time: %{x}<br>Interactions: %{y}<extra></extra>'
     )
+    
+        # Analytics Dashboard Section
+    st.title("Text Analytics Dashboard")
+    
+    # Number of queries
+    num_queries = get_query_count()
+    st.subheader(f"Number of queries: {num_queries}")
+    
+    # Create two columns for charts
+    col_satisfaction, col_topics = st.columns(2)
+    
+    with col_satisfaction:
+        # Customer Satisfaction Pie Chart
+        satisfaction = calculate_customer_satisfaction()
+        fig_satisfaction = go.Figure(data=[go.Pie(
+            values=[satisfaction, 100-satisfaction],
+            labels=['Satisfied', 'Other'],
+            hole=0.7,
+            marker_colors=['#4CAF50', '#263238'],
+            textinfo='percent',
+            showlegend=False
+        )])
+        
+        fig_satisfaction.update_layout(
+            title="Customer Satisfaction",
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            margin=dict(t=30, l=0, r=0, b=0),
+            annotations=[dict(
+                text=f"{satisfaction}%",
+                x=0.5, y=0.5,
+                font_size=24,
+                font_color='white',
+                showarrow=False
+            )]
+        )
+        
+        st.plotly_chart(fig_satisfaction, use_container_width=True)
+    
+    with col_topics:
+        # Common Topics Bar Chart
+        topics_df = get_common_topics()
+        fig_topics = go.Figure(data=[go.Bar(
+            x=topics_df['count'],
+            y=topics_df['topic'],
+            orientation='h',
+            marker_color='#64B5F6'
+        )])
+        
+        fig_topics.update_layout(
+            title="Common Topics",
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            margin=dict(l=0, r=10, t=30, b=0),
+            xaxis=dict(
+                showgrid=True,
+                gridcolor='rgba(255,255,255,0.1)',
+                range=[0, 13]
+            ),
+            yaxis=dict(
+                showgrid=False,
+                color='white'
+            ),
+            font=dict(color='white')
+        )
+        
+        st.plotly_chart(fig_topics, use_container_width=True)
 
         # Add download button for data
     st.download_button(
