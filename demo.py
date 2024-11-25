@@ -67,27 +67,55 @@ def get_query_count():
 
 
 def get_common_topics():
-    """Analyze messages to get common topics"""
+    """
+    Analyze messages to get common topics and update the common_topics table.
+    """
     conn = get_db_connection()
-    cursor = conn.cursor()  # Explicitly create the cursor
-    cursor.execute("SELECT message FROM chat_history")
+    cursor = conn.cursor()
+
+    # Fetch all messages
+    cursor.execute("SELECT user_id, message FROM chat_history")
     messages = cursor.fetchall()
-    cursor.close()  # Explicitly close the cursor
+    print(messages)
+
+    # Analyze messages to identify topics (replace with actual NLP processing)
+    topic_counts = {}  # {user_id: {topic: count}}
+    for user_id, message in messages:
+        # Dummy topic extraction (replace with actual logic, e.g., NLP keyword extraction)
+        topics = ['document', 'image', 'real-time', 'search', 'chatbot']
+        for topic in topics:
+            if topic in message.lower():
+                if user_id not in topic_counts:
+                    topic_counts[user_id] = {}
+                topic_counts[user_id][topic] = topic_counts[user_id].get(topic, 0) + 1
+
+    # Update the `common_topics` table
+    for user_id, topics in topic_counts.items():
+        for topic, count in topics.items():
+            # Check if the topic already exists for the user
+            cursor.execute(
+                "SELECT count FROM common_topics WHERE user_id = ? AND topic = ?",
+                (user_id, topic)
+            )
+            result = cursor.fetchone()
+            if result:
+                # Update the count
+                new_count = result[0] + count
+                cursor.execute(
+                    "UPDATE common_topics SET count = ? WHERE user_id = ? AND topic = ?",
+                    (new_count, user_id, topic)
+                )
+            else:
+                # Insert a new record
+                cursor.execute(
+                    "INSERT INTO common_topics (user_id, topic, count) VALUES (?, ?, ?)",
+                    (user_id, topic, count)
+                )
+
+    conn.commit()
+    cursor.close()
     conn.close()
 
-    
-    # Sample topics - you should implement actual message analysis here
-    topics = {
-        'Experience': 8,
-        'Im': 10,
-        'Incredible': 6,
-        'Luffy': 12,
-        'Madara': 12,
-        'Name': 9,
-        'Powerful': 9
-    }
-    
-    return pd.DataFrame(list(topics.items()), columns=['topic', 'count'])
 
 
 
@@ -391,34 +419,37 @@ def run_dashboard():
     
     
     with col_topics:
-        # Common Topics Bar Chart
-        topics_df = get_common_topics()
-        fig_topics = go.Figure(data=[go.Bar(
-            x=topics_df['count'],
-            y=topics_df['topic'],
-            orientation='h',
-            marker_color='#64B5F6'
-        )])
-        
-        fig_topics.update_layout(
-            title="Common Topics",
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)',
-            margin=dict(l=0, r=10, t=30, b=0),
-            xaxis=dict(
-                showgrid=True,
-                gridcolor='rgba(255,255,255,0.1)',
-                range=[0, 13]
-            ),
-            yaxis=dict(
-                showgrid=False,
-                color='white'
-            ),
-            font=dict(color='white')
-        )
-        
-        st.plotly_chart(fig_topics, use_container_width=True)
+        conn = get_db_connection()
+        cursor = conn.cursor()
 
+        # Fetch aggregated topic counts from the `common_topics` table
+        query = """
+        SELECT topic, SUM(count) as total_count
+        FROM common_topics
+        GROUP BY topic
+        ORDER BY total_count DESC
+        """
+        topics_df = pd.read_sql_query(query, conn)
+        conn.close()
+
+        if topics_df.empty:
+            st.warning("No common topics data available.")
+        else:
+            # Create a bar chart to display aggregated topic counts
+            fig = px.bar(
+                topics_df,
+                x="topic",
+                y="total_count",
+                title="Common Topics Count",
+                labels={"topic": "Topic", "total_count": "Total Count"},
+                color_discrete_sequence=["#64B5F6"]  # Optional: Specify bar color
+            )
+            fig.update_layout(
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)',
+                font=dict(color="white")
+            )
+            st.plotly_chart(fig, use_container_width=True)
         # Add download button for data
     st.download_button(
             label="Download Data",

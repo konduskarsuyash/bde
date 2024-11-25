@@ -327,6 +327,13 @@ def init_db():
                     timestamp TEXT,
                     FOREIGN KEY (user_id) REFERENCES users(user_id))''')
     
+    c.execute('''CREATE TABLE IF NOT EXISTS common_topics (
+                    topic_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    topic TEXT,
+                    count INTEGER,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id))''')
+    
     conn.commit()
     return conn, c
 
@@ -556,28 +563,53 @@ def handle_file_upload():
         
         st.success(f"File '{uploaded_file.name}' uploaded successfully to local storage.")
 
+def update_common_topics(user_id, prompt):
+    """
+    Extract keywords from the user prompt and update the common_topics table.
+    """
+    conn,cursor = init_db()
+    
+
+    # Dummy keyword extraction (replace with actual logic, e.g., NLP keyword extraction)
+    keywords = ['document', 'image', 'real-time', 'search', 'chatbot']
+    extracted_topics = [keyword for keyword in keywords if keyword in prompt.lower()]
+
+    for topic in extracted_topics:
+        # Check if the topic already exists for the user
+        cursor.execute(
+            "SELECT count FROM common_topics WHERE user_id = ? AND topic = ?",
+            (user_id, topic)
+        )
+        result = cursor.fetchone()
+        if result:
+            # Update the count
+            new_count = result[0] + 1
+            cursor.execute(
+                "UPDATE common_topics SET count = ? WHERE user_id = ? AND topic = ?",
+                (new_count, user_id, topic)
+            )
+        else:
+            # Insert a new record
+            cursor.execute(
+                "INSERT INTO common_topics (user_id, topic, count) VALUES (?, ?, ?)",
+                (user_id, topic, 1)
+            )
+
+    conn.commit()
+    cursor.close()
+    conn.close()
 
 def agent_ui():
     st.title("AI Assistant")
     st.write(f"Welcome, {st.session_state.username}!")
-
-    # Sidebar for previous questions as clickable items
-    st.sidebar.title("Previous Questions")
-    for i, memory in enumerate(st.session_state.memory):
-        question = memory["question"]
-        # Display only the first 30 characters of each question in the sidebar
-        if st.sidebar.button(f"{i + 1}. {question[:30]}...", key=f"question_{i}"):
-            st.session_state.selected_question = i  # Set the selected question index
-
+    
     # Check if a specific question has been selected for display
     if st.session_state.selected_question is not None:
-        # Display selected conversation details in the main area
         conversation = st.session_state.memory[st.session_state.selected_question]
         st.subheader("Selected Conversation")
         st.write(f"*User:* {conversation['question']}")
         st.write(f"*Agent:* {conversation['response']}")
     else:
-        # Optional: Display an introductory message if no question is selected
         st.write("Click on a question in the sidebar to view the conversation here.")
 
     # Input box for new query
@@ -592,6 +624,9 @@ def agent_ui():
             # Log the active timestamp whenever the user submits a query
             log_active_timestamp(st.session_state.user_id)
             
+            # Update common topics dynamically
+            update_common_topics(st.session_state.user_id, prompt)
+
             # Handle file uploads
             if len(st.session_state.memory) > 10:
                 st.session_state.memory.pop(0)  # Remove the oldest entry
