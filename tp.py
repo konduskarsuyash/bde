@@ -1,12 +1,6 @@
-import pika
-
-try:
-    connection = pika.BlockingConnection(pika.ConnectionParameters(
-        host='localhost',
-        port=5672,
-        credentials=pika.PlainCredentials('guest', 'guest')
-    ))
-    print("Connection successful")
-    connection.close()
-except Exception as e:
-    print(f"Failed to connect: {e}")
+def is_palindrome(num):
+        return str(num) == str(num)[::-1]
+    
+    # Test the function
+num = 12321
+print(is_palindrome(num))

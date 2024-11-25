@@ -10,8 +10,11 @@ from pyspark import SparkConf
 import os
 import plotly.graph_objects as go
 from datetime import timedelta
-
+import requests
 # Set page config
+import folium
+from streamlit_folium import st_folium
+
 st.set_page_config(
     page_title="User Geographic Distribution",
     page_icon="🌍",
@@ -85,35 +88,6 @@ def get_common_topics():
     }
     
     return pd.DataFrame(list(topics.items()), columns=['topic', 'count'])
-
-def calculate_customer_satisfaction():
-    """
-    Calculate customer satisfaction percentage based on chat history sentiment.
-    Positive messages are assumed to reflect customer satisfaction.
-    """
-    conn = sqlite3.connect("users.db", check_same_thread=False)
-    cursor = conn.cursor()
-    
-    try:
-        # Query to count positive and total messages
-        cursor.execute("SELECT COUNT(*) FROM chat_history WHERE role = 'positive'")
-        positive_count = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM chat_history")
-        total_count = cursor.fetchone()[0]
-        
-        if total_count == 0:
-            # Avoid division by zero; return 0% satisfaction if no data exists
-            return 0.0
-        
-        # Calculate satisfaction as a percentage
-        satisfaction_percentage = (positive_count / total_count) * 100
-        return round(satisfaction_percentage, 2)
-    
-    finally:
-        # Ensure resources are properly released
-        cursor.close()
-        conn.close()
 
 
 
@@ -189,14 +163,32 @@ def get_user_region(user_id):
         return result[0]
     return "Unknown"
 
-def get_country_code(region):
-    # Map city/region names to their corresponding country codes
-    region_to_country = {
-        'mumbai': 'IND',  # India
-        'new york': 'USA', # United States
-        # Add more mappings as needed
+@st.cache_data(ttl=86400)  # Cache for 24 hours
+def get_lat_lon(region):
+    base_url = "https://nominatim.openstreetmap.org/search"
+    params = {"q": region, "format": "json"}
+    headers = {
+        "User-Agent": "AI Assistant/1.0 (suyashhhh123@gmail.com)"
     }
-    return region_to_country.get(region.lower(), region)
+    try:
+        response = requests.get(base_url, params=params, headers=headers, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        if data:
+            return float(data[0]["lat"]), float(data[0]["lon"])
+        else:
+            return 0, 0
+    except Exception as e:
+        st.error(f"Error fetching coordinates for {region}: {e}")
+        return 0, 0
+    
+def prepare_map_data(df):
+    # Precompute coordinates outside the map rendering
+    df["coordinates"] = df["region"].apply(lambda r: get_lat_lon(r))
+    df["latitude"] = df["coordinates"].apply(lambda x: x[0] if x else None)
+    df["longitude"] = df["coordinates"].apply(lambda x: x[1] if x else None)
+    return df
 
 def run_dashboard():
     # Custom CSS for dark theme
@@ -230,68 +222,47 @@ def run_dashboard():
 
     # Main layout with columns
     col1, col2 = st.columns([2, 1])
-
     with col1:
-        # Create a new column with country codes
-        df['country_code'] = df['region'].apply(get_country_code)
+        # Precompute coordinates BEFORE map rendering
+        df = prepare_map_data(df)
 
-        # Create an empty figure
-        fig = go.Figure()
-
-        # Add scatter_geo for all regions (yellow dots)
-        fig.add_scattergeo(
-            lat=[19.0760 if r.lower() == 'mumbai' else 40.7128 if r.lower() == 'new york' else None for r in df['region']],
-            lon=[72.8777 if r.lower() == 'mumbai' else -74.0060 if r.lower() == 'new york' else None for r in df['region']],
-            text=df["region"],
-            marker=dict(
-                size=10,
-                color="yellow",
-                opacity=0.8,
-                line=dict(width=1, color='white')
-            ),
-            hoverinfo="text",
-            name="User Locations"
+        # Initialize a folium map centered on a default location
+        m = folium.Map(
+            location=[20.0, 0.0], 
+            zoom_start=2,
+            zoomControl=False,  # Disable zoom controls
+            scrollWheelZoom=False,  # Disable scroll wheel zooming
+            dragging=False  # Disable map dragging
         )
 
-        # If user is logged in, highlight their location
+        # Add markers ONCE
+        for _, row in df.iterrows():
+            if row["latitude"] and row["longitude"]:
+                folium.CircleMarker(
+                    location=[row["latitude"], row["longitude"]],
+                    radius=6,
+                    color="yellow",
+                    fill=True,
+                    fill_opacity=0.8,
+                    popup=row["region"]
+                ).add_to(m)
+
+        # Highlight logged-in user's location
         if user_id and user_region != "Unknown":
-            user_lat = 19.0760 if user_region.lower() == 'mumbai' else 40.7128 if user_region.lower() == 'new york' else None
-            user_lon = 72.8777 if user_region.lower() == 'mumbai' else -74.0060 if user_region.lower() == 'new york' else None
-            
+            user_lat, user_lon = get_lat_lon(user_region)
             if user_lat and user_lon:
-                fig.add_scattergeo(
-                    lat=[user_lat],
-                    lon=[user_lon],
-                    text=[f"Your Location: {user_region}"],
-                    marker=dict(
-                        size=15,
-                        symbol="star",
-                        color="red",
-                        opacity=1,
-                        line=dict(width=1.5, color='white')
-                    ),
-                    hoverinfo="text",
-                    name="Your Location"
-                )
+                folium.Marker(
+                    location=[user_lat, user_lon],
+                    icon=folium.Icon(color="red", icon="star"),
+                    popup=f"Your Location: {user_region}"
+                ).add_to(m)
 
-        # Update layout for dark theme and disable background color
-        fig.update_layout(
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)',
-            geo=dict(
-                showframe=False,
-                showcoastlines=True,
-                projection_type='equirectangular',
-                bgcolor='rgba(0,0,0,0)',
-                showcountries=True,
-                countrycolor='gray'
-            ),
-            height=500
-        )
-
-        # Display the figure
-        st.plotly_chart(fig, use_container_width=True)
-
+        # Display the map in Streamlit
+        st_folium(
+            m, 
+            width=700,  # Fixed width
+            height=500,  # Fixed height
+        )    
     with col2:
         st.subheader("Users by Region")
         
@@ -418,33 +389,6 @@ def run_dashboard():
     # Create two columns for charts
     col_satisfaction, col_topics = st.columns(2)
     
-    with col_satisfaction:
-        # Customer Satisfaction Pie Chart
-        satisfaction = calculate_customer_satisfaction()
-        fig_satisfaction = go.Figure(data=[go.Pie(
-            values=[satisfaction, 100-satisfaction],
-            labels=['Satisfied', 'Other'],
-            hole=0.7,
-            marker_colors=['#4CAF50', '#263238'],
-            textinfo='percent',
-            showlegend=False
-        )])
-        
-        fig_satisfaction.update_layout(
-            title="Customer Satisfaction",
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)',
-            margin=dict(t=30, l=0, r=0, b=0),
-            annotations=[dict(
-                text=f"{satisfaction}%",
-                x=0.5, y=0.5,
-                font_size=24,
-                font_color='white',
-                showarrow=False
-            )]
-        )
-        
-        st.plotly_chart(fig_satisfaction, use_container_width=True)
     
     with col_topics:
         # Common Topics Bar Chart

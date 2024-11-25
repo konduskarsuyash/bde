@@ -22,6 +22,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.utils import formataddr
 import threading,json,pika,time,logging
+from tools.type_string import type_text
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -432,7 +433,7 @@ llm = OpenAI(model="gpt-4", system_prompt=system_prompt)
 
 tools = [
     check_image, generate_image_tool, camera_query_tool, realtime_search_tool,
-    search_video_tool, get_video_url_tool, get_transcript_tool, get_video_captions_tool, text_rag_tool
+    search_video_tool, get_video_url_tool, get_transcript_tool, get_video_captions_tool, text_rag_tool,type_text
 ]
 
 agent = ReActAgent.from_tools(
