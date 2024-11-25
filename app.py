@@ -300,7 +300,8 @@ def send_email(recipient_email, subject, body):
     
     
 def init_db():
-    conn = sqlite3.connect("users.db", check_same_thread=False)
+    database_path = os.getenv("DATABASE_PATH", "users.db")
+    conn = sqlite3.connect(database_path, check_same_thread=False)
     c = conn.cursor()
     
     # Create tables if they don't exist
@@ -398,26 +399,10 @@ def login_user(username, password):
         user_id, _, email = user
         log_active_timestamp(user_id)
         
-        # Prepare login notification message
-        login_message = f"""Welcome back, {username}!
-        
-You have successfully logged in to your AI Assistant Chat account.
-Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-If this wasn't you, please contact support immediately.
-
-Best regards,
-The AI Assistant Chat Team"""
-        
-        # Publish login notification through AMPS
-        notification_system.publish_notification(
-            user_id, 
-            email, 
-            "login",
-            login_message
-        )
+        # Successfully logged in without sending notifications
         return user_id
     return None
+
 
 # Chat history functions
 def save_message(user_id, role, message):
@@ -506,7 +491,7 @@ def admin_login():
             st.success("Admin login successful!")
             
             # Redirect to the admin dashboard (running on localhost:8502)
-            st.markdown("[Go to Admin Dashboard](http://localhost:8502)", unsafe_allow_html=True)
+            st.markdown("[Go to Admin Dashboard](http://localhost:8504)", unsafe_allow_html=True)
         else:
             st.error("Incorrect admin credentials!")
 
@@ -514,13 +499,22 @@ def show_chat_history():
     if st.session_state.user_id:
         history = get_user_chat_history(st.session_state.user_id)
         st.sidebar.subheader("Chat History")
-        for role, message, timestamp in history:
-            with st.sidebar.expander(f"{role} - {timestamp}"):
-                st.write(message)
+        for role, message, _ in history:
+            if role == "user":  # Only display messages from the user
+                truncated_message = message[:50] + "..." if len(message) > 50 else message
+                with st.sidebar.expander(truncated_message):
+                    st.write(message)
+
 
 # File upload and management
 def handle_file_upload():
-    uploaded_file = st.file_uploader("Upload PDF file", type=["pdf"], label_visibility="collapsed")
+    # File uploader widget supporting both PDF and image file types
+    uploaded_file = st.file_uploader(
+        "Upload file (PDF or Image)", 
+        type=["pdf", "jpg", "jpeg", "png", "gif", "bmp", "tiff", "svg"], 
+        label_visibility="collapsed"
+    )
+    
     if uploaded_file:
         # Set up Firebase Storage bucket
         bucket = storage.bucket()
@@ -528,28 +522,39 @@ def handle_file_upload():
         # Generate a unique filename for the uploaded file in Firebase Storage
         filename = f"uploads/{uploaded_file.name}"
 
-        # Create a blob (object) and upload the file
+        # Determine file content type for upload
+        if uploaded_file.name.lower().endswith(".pdf"):
+            content_type = 'application/pdf'
+        elif uploaded_file.name.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".svg")):
+            content_type = f'image/{uploaded_file.name.split(".")[-1]}'
+        else:
+            st.error("Unsupported file type.")
+            return
+        
+        # Create a blob (object) and upload the file to Firebase Storage
         blob = bucket.blob(filename)
-        blob.upload_from_string(uploaded_file.getvalue(), content_type='application/pdf')
+        blob.upload_from_string(uploaded_file.getvalue(), content_type=content_type)
 
         st.success(f"File '{uploaded_file.name}' uploaded successfully to Firebase Storage.")
         
-    if uploaded_file:
+        # Save the uploaded file locally
         data_folder = "data"
         if not os.path.exists(data_folder):
             os.makedirs(data_folder)
         
-        # Remove all existing PDFs in the data folder
+        # Remove all existing files with the same extension in the data folder
+        extensions_to_clean = [".pdf", ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".svg"]
         for file in os.listdir(data_folder):
-            if file.endswith(".pdf"):
+            if any(file.endswith(ext) for ext in extensions_to_clean):
                 os.remove(os.path.join(data_folder, file))
         
-        # Save the newly uploaded file
+        # Save the newly uploaded file locally
         file_path = os.path.join(data_folder, uploaded_file.name)
         with open(file_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
         
-        st.success(f"File '{uploaded_file.name}' uploaded successfully.")
+        st.success(f"File '{uploaded_file.name}' uploaded successfully to local storage.")
+
 
 def agent_ui():
     st.title("AI Assistant")
@@ -632,8 +637,6 @@ def main():
     initialize_firebase()
     
     notification_system.start_subscriber()
-
-    st.title("AI Assistant")
     
     # Initialize session state
     if "logged_in" not in st.session_state:
