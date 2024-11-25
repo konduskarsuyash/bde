@@ -16,6 +16,16 @@ from tools.RAG import text_rag_tool
 # firebase_config.py
 import firebase_admin
 from firebase_admin import credentials, storage
+import smtplib
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.utils import formataddr
+import threading,json,pika,time,logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 
 def initialize_firebase():
     if not firebase_admin._apps:
@@ -28,8 +38,267 @@ def initialize_firebase():
 load_dotenv()
 os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
 
-# Database setup
-# Database setup with SQLite
+
+# Email configuration
+EMAIL_HOST = os.getenv("EMAIL_HOST", "smtp.your-email-provider.com")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
+EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS", "your-email@example.com")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+
+# RabbitMQ configuration
+RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "localhost")
+RABBITMQ_PORT = int(os.getenv("RABBITMQ_PORT", "5672"))
+RABBITMQ_USER = os.getenv("RABBITMQ_USER", "guest")
+RABBITMQ_PASS = os.getenv("RABBITMQ_PASS", "guest")
+RABBITMQ_EXCHANGE = "notifications"
+RABBITMQ_QUEUE = "email_notifications"
+
+class EmailNotificationSystem:
+    def __init__(self):
+        self.connection = None
+        self.channel = None
+        self.should_reconnect = True
+        self.reconnect_delay = 5
+        self.max_reconnect_delay = 300
+        self.subscriber_thread = None
+        self.logger = logging.getLogger(__name__)
+        self.connection_error_logged = False  # Flag to prevent duplicate error logs
+
+    def get_connection_params(self):
+        """Get RabbitMQ connection parameters with improved error handling"""
+        try:
+            return pika.ConnectionParameters(
+                host=RABBITMQ_HOST,
+                port=RABBITMQ_PORT,
+                credentials=pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS),
+                heartbeat=600,
+                connection_attempts=3,
+                retry_delay=2,
+                socket_timeout=5,
+                # Add specific IPv4 configuration
+                stack_timeout=float(5),
+                tcp_options={'family': 2}  # Force IPv4
+            )
+        except Exception as e:
+            self.logger.error(f"Error creating connection parameters: {e}")
+            return None
+
+    def initialize_rabbitmq(self):
+        """Initialize RabbitMQ connection with improved error handling"""
+        if not self.should_reconnect:
+            return False
+
+        try:
+            # Check if RabbitMQ is actually running first
+            import socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(2)
+            result = sock.connect_ex((RABBITMQ_HOST, RABBITMQ_PORT))
+            sock.close()
+
+            if result != 0:
+                if not self.connection_error_logged:
+                    self.logger.error(f"RabbitMQ server is not accessible at {RABBITMQ_HOST}:{RABBITMQ_PORT}")
+                    self.logger.info("Ensure RabbitMQ server is running and accessible")
+                    self.connection_error_logged = True
+                return False
+
+            # Close existing connection if any
+            if self.connection and not self.connection.is_closed:
+                try:
+                    self.connection.close()
+                except Exception:
+                    pass
+
+            # Create new connection
+            params = self.get_connection_params()
+            if not params:
+                return False
+
+            self.connection = pika.BlockingConnection(params)
+            self.channel = self.connection.channel()
+
+            # Declare exchange and queue with error handling
+            self.channel.exchange_declare(
+                exchange=RABBITMQ_EXCHANGE,
+                exchange_type='direct',
+                durable=True
+            )
+
+            self.channel.queue_declare(
+                queue=RABBITMQ_QUEUE,
+                durable=True
+            )
+
+            self.channel.queue_bind(
+                exchange=RABBITMQ_EXCHANGE,
+                queue=RABBITMQ_QUEUE,
+                routing_key='email'
+            )
+
+            self.reconnect_delay = 5  # Reset delay on successful connection
+            self.connection_error_logged = False  # Reset error log flag
+            self.logger.info("Successfully connected to RabbitMQ")
+            return True
+
+        except (socket.error, pika.exceptions.AMQPConnectionError) as e:
+            if not self.connection_error_logged:
+                self.logger.error(f"Failed to connect to RabbitMQ: {e}")
+                self.connection_error_logged = True
+            return self.handle_connection_failure()
+
+        except Exception as e:
+            self.logger.error(f"Unexpected error during RabbitMQ initialization: {e}")
+            return self.handle_connection_failure()
+    
+    def process_message(self, ch, method, properties, body):
+        """Process the received message and handle email notifications"""
+        try:
+            # Deserialize the message body (JSON)
+            notification = json.loads(body)
+
+            # Extract relevant data from the notification
+            user_id = notification.get("user_id")
+            email = notification.get("email")
+            message_type = notification.get("message_type")
+            message = notification.get("message")
+            
+            if not all([user_id, email, message_type, message]):
+                self.logger.error("Received incomplete notification data")
+                return
+
+            # Send email notification (you can use your existing send_email method)
+            subject = {
+                "welcome": "Welcome to AI Assistant Chat!",
+                "login": "New Login Detected"
+            }.get(message_type, "AI Assistant Chat Notification")
+            
+            success = send_email(email, subject, message)
+
+            if success:
+                self.logger.info(f"Successfully sent email to {email}")
+                ch.basic_ack(delivery_tag=method.delivery_tag)  # Acknowledge the message
+            else:
+                self.logger.error(f"Failed to send email to {email}")
+                ch.basic_nack(delivery_tag=method.delivery_tag)  # Negative acknowledgment if failed
+
+        except Exception as e:
+            self.logger.error(f"Error processing message: {e}")
+            ch.basic_nack(delivery_tag=method.delivery_tag) 
+        
+    def start_subscriber(self):
+        """Start the subscriber with automatic reconnection"""
+        def subscription_loop():
+            while self.should_reconnect:
+                try:
+                    if self.initialize_rabbitmq():
+                        self.channel.basic_qos(prefetch_count=1)
+                        self.channel.basic_consume(
+                            queue=RABBITMQ_QUEUE,
+                            on_message_callback=self.process_message
+                        )
+                        logger.info("Starting to consume messages")
+                        self.channel.start_consuming()
+                except Exception as e:
+                    logger.error(f"Subscription error: {e}")
+                    time.sleep(self.reconnect_delay)
+
+        if not self.subscriber_thread or not self.subscriber_thread.is_alive():
+            self.subscriber_thread = threading.Thread(
+                target=subscription_loop, 
+                daemon=True,
+                name="RabbitMQ-Subscriber"
+            )
+            self.subscriber_thread.start()
+            logger.info("Started subscriber thread")
+        return self.subscriber_thread
+
+    def handle_connection_failure(self):
+        """Handle connection failures with exponential backoff"""
+        if self.should_reconnect:
+            self.logger.info(f"Retrying in {self.reconnect_delay} seconds...")
+            time.sleep(self.reconnect_delay)
+            self.reconnect_delay = min(self.reconnect_delay * 2, self.max_reconnect_delay)
+        return False
+
+    def publish_notification(self, user_id, email, message_type, message):
+        """Publish notification with improved error handling"""
+        if not all([user_id, email, message_type, message]):
+            self.logger.error("Invalid notification parameters")
+            return False
+
+        max_retries = 3
+        current_retry = 0
+
+        while current_retry < max_retries:
+            try:
+                if not self.connection or self.connection.is_closed:
+                    if not self.initialize_rabbitmq():
+                        raise Exception("Failed to initialize RabbitMQ connection")
+
+                notification = {
+                    "user_id": user_id,
+                    "email": email,
+                    "message_type": message_type,
+                    "message": message,
+                    "timestamp": datetime.now().isoformat()
+                }
+
+                self.channel.basic_publish(
+                    exchange=RABBITMQ_EXCHANGE,
+                    routing_key='email',
+                    body=json.dumps(notification),
+                    properties=pika.BasicProperties(
+                        delivery_mode=2,
+                        content_type='application/json'
+                    )
+                )
+                self.logger.info(f"Successfully published notification for {email}")
+                return True
+
+            except Exception as e:
+                current_retry += 1
+                self.logger.warning(f"Attempt {current_retry} failed: {e}")
+                if current_retry < max_retries:
+                    time.sleep(2 ** current_retry)
+                else:
+                    self.logger.error(f"Failed to publish notification after {max_retries} retries")
+                    # Fallback to direct email sending if RabbitMQ fails
+                    return self.send_email_fallback(email, message_type, message)
+
+    def send_email_fallback(self, recipient_email, message_type, message):
+        """Fallback method to send emails directly when RabbitMQ fails"""
+        try:
+            subject = {
+                "welcome": "Welcome to AI Assistant Chat!",
+                "login": "New Login Detected"
+            }.get(message_type, "AI Assistant Chat Notification")
+            
+            return self.send_email(recipient_email, subject, message)
+        except Exception as e:
+            self.logger.error(f"Email fallback failed: {e}")
+            return False
+# Initialize the notification system
+notification_system = EmailNotificationSystem()
+
+def send_email(recipient_email, subject, body):
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = formataddr(("AI Assistant Chat", EMAIL_ADDRESS))
+        msg['To'] = recipient_email
+        msg['Subject'] = subject
+        msg.attach(MIMEText(body, 'plain'))
+        
+        with smtplib.SMTP(EMAIL_HOST, EMAIL_PORT) as server:
+            server.starttls()
+            server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+            server.sendmail(EMAIL_ADDRESS, recipient_email, msg.as_string())
+        return True
+    except Exception as e:
+        st.error(f"Failed to send email: {e}")
+        return False
+    
+    
 def init_db():
     conn = sqlite3.connect("users.db", check_same_thread=False)
     c = conn.cursor()
@@ -39,6 +308,7 @@ def init_db():
                     user_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     username TEXT UNIQUE,
                     region TEXT,
+                    email TEXT UNIQUE,
                     password TEXT)''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS chat_history (
@@ -76,23 +346,77 @@ def check_password(password, hashed):
         hashed = hashed.encode('utf-8')
     return bcrypt.checkpw(password.encode('utf-8'), hashed)
 
-def signup_user(username, password, region):
+def signup_user(username, email, password, region):
     try:
         hashed_password = hash_password(password).decode('utf-8')
         c.execute(
-            "INSERT INTO users (username, password, region) VALUES (?, ?, ?)", 
-            (username, hashed_password, region)
+            "INSERT INTO users (username, email, password, region) VALUES (?, ?, ?, ?)", 
+            (username, email, hashed_password, region)
         )
         conn.commit()
+        
+        # Get the user_id of the newly created user
+        c.execute("SELECT user_id FROM users WHERE username = ?", (username,))
+        user_id = c.fetchone()[0]
+        
+        # Prepare welcome message
+        welcome_message = f"""Welcome to AI Assistant Chat, {username}!
+        
+Thank you for joining us. Your account has been successfully created.
+
+You can now:
+- Chat with our AI Assistant
+- Upload and analyze documents
+- Access your chat history
+- And much more!
+
+If you have any questions, feel free to ask our AI Assistant.
+
+Best regards,
+The AI Assistant Chat Team"""
+        
+        # Publish welcome notification through AMPS
+        notification_system.publish_notification(
+            user_id, 
+            email, 
+            "welcome",
+            welcome_message
+        )
         return True
-    except sqlite3.IntegrityError:
+        
+    except sqlite3.IntegrityError as e:
+        st.error(f"Database error: {e}")
+        return False
+    except Exception as e:
+        st.error(f"Error during signup: {e}")
         return False
 
 def login_user(username, password):
-    c.execute("SELECT user_id, password FROM users WHERE username = ?", (username,))
+    c.execute("SELECT user_id, password, email FROM users WHERE username = ?", (username,))
     user = c.fetchone()
     if user and check_password(password, user[1]):
-        return user[0]  # Return user_id
+        user_id, _, email = user
+        log_active_timestamp(user_id)
+        
+        # Prepare login notification message
+        login_message = f"""Welcome back, {username}!
+        
+You have successfully logged in to your AI Assistant Chat account.
+Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+If this wasn't you, please contact support immediately.
+
+Best regards,
+The AI Assistant Chat Team"""
+        
+        # Publish login notification through AMPS
+        notification_system.publish_notification(
+            user_id, 
+            email, 
+            "login",
+            login_message
+        )
+        return user_id
     return None
 
 # Chat history functions
@@ -136,12 +460,13 @@ agent = ReActAgent.from_tools(
 def show_signup():
     st.subheader("Create New Account")
     username = st.text_input("Username", key="signup_username")
+    email = st.text_input("Email", key="signup_email")
     password = st.text_input("Password", type="password", key="signup_password")
     region = st.text_input("Region", key="region_key")  # Removed 'type' argument
 
     if st.button("Signup"):
-        if username and password and region:
-            if signup_user(username, password, region):
+        if username and email and password and region:
+            if signup_user(username, email,password, region):
                 st.success("Account created! Please log in.")
                 st.rerun()  # Updated rerun method
             else:
@@ -152,6 +477,7 @@ def show_signup():
 def show_login():
     st.subheader("Login")
     username = st.text_input("Username", key="login_username")
+    email = st.text_input("Email", key="login_email")
     password = st.text_input("Password", type="password", key="login_password")
     if st.button("Login"):
         user_id = login_user(username, password)
@@ -304,6 +630,9 @@ def logout():
 def main():
     # Initialize Firebase once
     initialize_firebase()
+    
+    notification_system.start_subscriber()
+
     st.title("AI Assistant")
     
     # Initialize session state

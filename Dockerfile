@@ -7,7 +7,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     locales \
     ca-certificates-java \
-    procps && \
+    procps \
+    curl \
+    gnupg \
+    apt-transport-https && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -41,6 +44,9 @@ RUN mkdir -p /tmp/spark-temp && chmod -R 777 /tmp/spark-temp
 
 # Add a basic log4j configuration
 RUN echo "log4j.rootCategory=INFO, console" > $SPARK_HOME/conf/log4j.properties
+
+# Install RabbitMQ client (pika)
+RUN pip install --no-cache-dir pika
 
 # Set the working directory
 WORKDIR /app

@@ -22,6 +22,7 @@ services:
       - PYSPARK_PYTHON=/usr/local/bin/python
       - PYSPARK_DRIVER_PYTHON=/usr/local/bin/python
       - PYSPARK_SUBMIT_ARGS="--conf spark.driver.memory=4g --conf spark.executor.memory=2g pyspark-shell"
+      - RABBITMQ_HOST=rabbitmq
     command: streamlit run app.py --server.port=8501 --server.address=0.0.0.0
     volumes:
       - .:/app
@@ -29,6 +30,7 @@ services:
       - "8501:8501"
     depends_on:
       - db
+      - rabbitmq
 
   demo:
     build: .
@@ -42,6 +44,7 @@ services:
       - PYSPARK_PYTHON=/usr/local/bin/python
       - PYSPARK_DRIVER_PYTHON=/usr/local/bin/python
       - PYSPARK_SUBMIT_ARGS="--conf spark.driver.memory=4g --conf spark.executor.memory=2g pyspark-shell"
+      - RABBITMQ_HOST=rabbitmq
     command: streamlit run demo.py --server.port=8502 --server.address=0.0.0.0
     volumes:
       - .:/app
@@ -49,6 +52,7 @@ services:
       - "8502:8502"
     depends_on:
       - db
+      - rabbitmq
 
   adminer:
     image: adminer
@@ -58,5 +62,17 @@ services:
     depends_on:
       - db
 
+  rabbitmq:
+    image: "rabbitmq:management"
+    ports:
+      - "15672:15672"  # RabbitMQ management plugin (web interface)
+      - "5672:5672"    # RabbitMQ AMQP port
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
 volumes:
   postgres_data:
+  rabbitmq_data:
